@@ -209,16 +209,25 @@ def merge_metrics(fixtures, metrics):
     return combined.reset_index(drop=True).sort_values("PPI_DIFF")
 
 
-# Main leagues
-main_fixtures = pd.concat([get_fixtures(league) for league in main_leagues])
-main_ppi_tables = pd.concat([get_ppi_tables(league) for league in main_leagues])
+fixtures = []
+for league in main_leagues:
+    try:
+        fixtures.append(get_fixtures(league))
+    except Exception as e:
+        print(e)
+        continue
+
+main_fixtures = pd.concat(fixtures)
+
+ppi_tables = []
+for league in main_leagues:
+    try:
+        ppi_tables.append(get_ppi_tables(league))
+    except Exception as e:
+        print(e)
+        continue
+
+main_ppi_tables = pd.concat(ppi_tables)
 merge_metrics(main_fixtures, main_ppi_tables).to_csv(
     f"{TODAY}_PPI_LATEST_MAIN.csv", index=False
-)
-
-# Extra Leagues
-extra_fixtures = pd.concat([get_fixtures(league) for league in extra_leagues])
-extra_ppi_tables = pd.concat([get_ppi_tables(league) for league in extra_leagues])
-merge_metrics(extra_fixtures, extra_ppi_tables).to_csv(
-    f"{TODAY}_PPI_LATEST_EXTRA.csv", index=False
 )
