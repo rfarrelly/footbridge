@@ -1,10 +1,55 @@
 import random
+import re
+import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 from curl_cffi import requests
 from utils.datetime_helpers import filter_date_range
+
+# ==========================================
+# LOGGING SETUP
+# ==========================================
+
+
+class Tee:
+    """Write output to both the console and a log file."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, message):
+        for stream in self.streams:
+            stream.write(message)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self):
+        return False
+
+
+LOG_FILE = Path.cwd() / (f"soccerstats_{datetime.now():%Y%m%d_%H%M%S}.log")
+
+log_handle = open(LOG_FILE, "w", encoding="utf-8", buffering=1)
+
+sys.stdout = Tee(sys.__stdout__, log_handle)
+sys.stderr = Tee(sys.__stderr__, log_handle)
+
+print("=" * 60)
+print("SOCCERSTATS SCRAPER")
+print(f"Started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+print(f"Log: {LOG_FILE.resolve()}")
+print("=" * 60)
+
+
+# ==========================================
+# LEAGUE CONFIGURATION
+# ==========================================
 
 main_leagues = [
     "england",
@@ -51,141 +96,342 @@ extra_leagues = [
     "ukraine",
 ]
 
-ALT_INDEX_LEAGUES = [
-    "greece",
-    "scotland",
-    "scotland3",
-    "scotland4",
-    "switzerland",
-    "czechrepublic",
-    "denmark",
-    "finland",
-    "poland",
-    "ukraine",
-]
+# (country_slug, league_slug)
+LEAGUE_URLS = {
+    "england": ("england", "premier-league"),
+    "england2": ("england", "championship"),
+    "england3": ("england", "league-one"),
+    "england4": ("england", "league-two"),
+    "england5": ("england", "national-league"),
+    "belgium": ("belgium", "pro-league"),
+    "germany": ("germany", "bundesliga"),
+    "germany2": ("germany", "2-bundesliga"),
+    "spain": ("spain", "laliga"),
+    "spain2": ("spain", "laliga2"),
+    "france": ("france", "ligue-1"),
+    "france2": ("france", "ligue-2"),
+    "greece": ("greece", "super-league"),
+    "netherlands": ("netherlands", "eredivisie"),
+    "netherlands2": ("netherlands", "eerste-divisie"),
+    "italy": ("italy", "serie-a"),
+    "italy2": ("italy", "serie-b"),
+    "portugal": ("portugal", "liga-portugal"),
+    "portugal2": ("portugal", "liga-portugal-2"),
+    "scotland": ("scotland", "premiership"),
+    "scotland2": ("scotland", "championship"),
+    "scotland3": ("scotland", "league-one"),
+    "scotland4": ("scotland", "league-two"),
+    "turkey": ("turkey", "super-lig"),
+}
 
-TODAY = datetime.now().date()
-TIME_DELTA = 3
-END_DATE = TODAY + timedelta(days=TIME_DELTA)
+
+# ==========================================
+# DATE AND REQUEST CONFIGURATION
+# ==========================================
+
+TODAY = pd.Timestamp.today().normalize()
+TIME_DELTA = 4
+END_DATE = TODAY + pd.Timedelta(days=TIME_DELTA)
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/91.0.4472.124 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.5",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
-def get_ppi_tables(league):
-    print(f"Getting PPI for {league}")
-    url = f"https://www.soccerstats.com/table.asp?league={league}&tid=rp"
+# ==========================================
+# GET PPI DATA
+# ==========================================
 
-    res = requests.get(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        },
-        impersonate="safari_ios",
+
+def get_ppi(league):
+    if league not in LEAGUE_URLS:
+        print(f"[PPI] {league}: skipped (no URL mapping)")
+        return pd.DataFrame()
+
+    country_slug, league_slug = LEAGUE_URLS[league]
+
+    if "PLACEHOLDER" in (country_slug, league_slug):
+        print(f"[PPI] {league}: skipped (placeholder URL)")
+        return pd.DataFrame()
+
+    url = (
+        f"https://www.soccerstats.com/en-gb/leagues/"
+        f"{country_slug}/{league_slug}/{league}/table/pointsperformance"
     )
 
-    ppi_table = (
-        pd.read_html(res.content)[11]
-        .drop(
-            ["Unnamed: 0", "Points Performance Index (Team PPG x Opponents PPG)"],
-            axis=1,
+    try:
+        res = requests.get(
+            url,
+            headers=HEADERS,
+            impersonate="safari_ios",
         )
-        .rename(
-            columns={
-                "Unnamed: 1": "Team",
-                "Team PPG": "TeamPPG",
-                "Opponents PPG": "OppsPPG",
-                "Points Performance Index (Team PPG x Opponents PPG).1": "PPI",
-            }
-        )
-    )
+        res.raise_for_status()
 
-    ppi_table = ppi_table.head(len(ppi_table) - 1)
+        tables = pd.read_html(res.content)
 
-    ppi_table["OppsPPG"] = (
-        ppi_table["OppsPPG"].str.extract(r"^\s*([0-9]+(?:\.[0-9]+)?)").astype(float)
-    )
+        ppi_table = None
 
-    ppi_table["TeamPPG"] = ppi_table["TeamPPG"].astype(float)
-    ppi_table["PPI"] = ppi_table["PPI"].astype(float)
+        for table in tables:
+            if isinstance(table.columns, pd.MultiIndex):
+                table.columns = [
+                    " ".join(
+                        str(part)
+                        for part in col
+                        if str(part) != "nan" and not str(part).startswith("Unnamed")
+                    ).strip()
+                    for col in table.columns
+                ]
+            else:
+                table.columns = [str(col).strip() for col in table.columns]
 
-    if league == "england5":
-        ppi_table.to_csv(f"SOCCERSTATS/{TODAY}_{league}.csv", index=False)
+            headings = " ".join(table.columns).lower()
 
-    league_average_ppg = ppi_table["TeamPPG"].mean()
+            if (
+                "team" in headings
+                and "opponents" in headings
+                and "points performance index" in headings
+            ):
+                ppi_table = table.copy()
+                break
 
-    ppi_table["PPINorm"] = round(ppi_table["PPI"] / league_average_ppg**2, 2)
+        if ppi_table is None:
+            print(f"[PPI] {league}: failed (PPI table not found)")
+            return pd.DataFrame()
 
-    delay = random.randint(5, 10)
-    print(f"Waiting {delay} seconds")
-    time.sleep(delay)
+        def find_column(keyword, exclude=None):
+            exclude = exclude or []
 
-    return ppi_table
+            for col in ppi_table.columns:
+                name = str(col).lower()
+
+                if keyword in name and not any(x in name for x in exclude):
+                    return col
+
+            return None
+
+        team_col = find_column("team")
+        gp_col = find_column("gp")
+        team_ppg_col = find_column("team ppg")
+        opps_ppg_col = find_column("opponents ppg")
+        ppi_col = find_column("points performance index")
+
+        required = {
+            "Team": team_col,
+            "GP": gp_col,
+            "TeamPPG": team_ppg_col,
+            "OppsPPG": opps_ppg_col,
+            "PPI": ppi_col,
+        }
+
+        missing = [name for name, col in required.items() if col is None]
+
+        if missing:
+            print(f"[PPI] {league}: failed (missing columns: {missing})")
+            return pd.DataFrame()
+
+        df = ppi_table[
+            [
+                team_col,
+                gp_col,
+                team_ppg_col,
+                opps_ppg_col,
+                ppi_col,
+            ]
+        ].copy()
+
+        df.columns = [
+            "Team",
+            "GP",
+            "TeamPPG",
+            "OppsPPG",
+            "PPI",
+        ]
+
+        df = df.dropna(subset=["Team"])
+
+        for col in ["GP", "TeamPPG", "OppsPPG", "PPI"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna(subset=["PPI"])
+
+        df["League"] = league
+
+        delay = random.randint(5, 10)
+        time.sleep(delay)
+
+        print(f"[PPI] {league}: {len(df)} teams collected")
+
+        return df.reset_index(drop=True)
+
+    except Exception as e:
+        print(f"[PPI] {league}: error ({e})")
+        return pd.DataFrame()
+
+
+# ==========================================
+# GET FIXTURES
+# ==========================================
 
 
 def get_fixtures(league):
-    print(f"Getting fixtures for {league}")
-    url = f"https://www.soccerstats.com/results.asp?league={league}"
-    res = requests.get(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        },
-        impersonate="safari_ios",
+    empty_df = pd.DataFrame(columns=["Date", "Home", "Time", "Away", "League"])
+
+    if league not in LEAGUE_URLS:
+        print(f"[Fixtures] {league}: skipped (no URL mapping)")
+        return empty_df
+
+    country_slug, league_slug = LEAGUE_URLS[league]
+
+    if "PLACEHOLDER" in country_slug or "PLACEHOLDER" in league_slug:
+        print(f"[Fixtures] {league}: skipped (placeholder URL)")
+        return empty_df
+
+    url = (
+        f"https://www.soccerstats.com/nodeweb/en-gb/leagues/"
+        f"{country_slug}/{league_slug}/{league}/matchlist/bymonth"
     )
 
-    table_index = 10
-    if league in ALT_INDEX_LEAGUES:
-        table_index = 9
+    try:
+        res = requests.get(
+            url,
+            headers=HEADERS,
+            impersonate="safari_ios",
+        )
+        res.raise_for_status()
 
-    df = (
-        pd.read_html(res.content)[table_index]
-        .dropna(how="all")
-        .iloc[1:]
-        .rename(columns={0: "Date", 1: "Home", 2: "Time", 3: "Away"})[
-            ["Date", "Home", "Time", "Away"]
-        ]
-    )
+        tables = pd.read_html(res.content)
 
-    if df.empty:
-        return df
+        fixtures = []
 
-    df = df[~df["Time"].str.contains(r"\d+\s*-\s*\d+", regex=True, na=False)]
+        date_pattern = r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)" r"\s+\d{1,2}\s+[A-Za-z]{3}$"
 
-    current_year = datetime.now().year
-    df["Date"] = pd.to_datetime(df["Date"] + f" {current_year}", format="%a %d %b %Y")
-    df["League"] = league
+        time_pattern = r"^\d{1,2}:\d{2}$"
 
-    delay = random.randint(5, 10)
-    print(f"Waiting {delay} seconds")
-    time.sleep(delay)
+        for table in tables:
+            for _, row in table.iterrows():
+                if len(row) < 3:
+                    continue
 
-    print(f"Getting fixtures for dates between {TODAY} to {END_DATE}")
+                match_date = str(row.iloc[0]).strip()
+                match_time = str(row.iloc[1]).strip()
+                fixture = str(row.iloc[2]).strip()
 
-    return filter_date_range(df, TODAY, END_DATE)
+                if not re.match(
+                    date_pattern,
+                    match_date,
+                    re.IGNORECASE,
+                ):
+                    continue
+
+                if not re.match(time_pattern, match_time):
+                    continue
+
+                teams = re.split(
+                    r"\s+vs\s+",
+                    fixture,
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )
+
+                if len(teams) != 2:
+                    continue
+
+                home = teams[0].strip()
+                away = teams[1].strip()
+
+                fixtures.append(
+                    {
+                        "Date": match_date,
+                        "Home": home,
+                        "Time": match_time,
+                        "Away": away,
+                        "League": league,
+                    }
+                )
+
+        df = pd.DataFrame(fixtures)
+
+        if df.empty:
+            print(f"[Fixtures] {league}: no upcoming fixtures")
+            return empty_df
+
+        current_year = datetime.now().year
+
+        df["Date"] = pd.to_datetime(
+            df["Date"] + f" {current_year}",
+            format="%a %d %b %Y",
+        )
+
+        df.loc[
+            df["Date"] < TODAY - timedelta(days=180),
+            "Date",
+        ] += pd.DateOffset(years=1)
+
+        df = filter_date_range(df, TODAY, END_DATE)
+
+        delay = random.randint(5, 10)
+        time.sleep(delay)
+
+        print(f"[Fixtures] {league}: {len(df)} fixtures collected")
+
+        return df.reset_index(drop=True)
+
+    except Exception as e:
+        print(f"[Fixtures] {league}: error ({e})")
+        return empty_df
+
+
+# ==========================================
+# MERGE FIXTURES AND PPI
+# ==========================================
 
 
 def merge_metrics(fixtures, metrics):
-    combined = fixtures.merge(metrics, left_on="Home", right_on="Team")
-    combined = combined.merge(metrics, left_on="Away", right_on="Team").rename(
+    fixtures = fixtures.drop_duplicates(
+        subset=["League", "Date", "Time", "Home", "Away"]
+    ).copy()
+
+    home_metrics = metrics[["League", "Team", "GP", "PPI"]].rename(
         columns={
-            "PPI_x": "hPPI",
-            "PPI_y": "aPPI",
-            "GP_x": "hGP",
-            "GP_y": "aGP",
-            "PPI_x": "hPPI",
-            "PPI_y": "aPPI",
-            "PPINorm_x": "hPPINorm",
-            "PPINorm_y": "aPPINorm",
+            "Team": "Home",
+            "GP": "hGP",
+            "PPI": "hPPI",
         }
     )
+
+    away_metrics = metrics[["League", "Team", "GP", "PPI"]].rename(
+        columns={
+            "Team": "Away",
+            "GP": "aGP",
+            "PPI": "aPPI",
+        }
+    )
+
+    combined = fixtures.merge(
+        home_metrics,
+        on=["League", "Home"],
+        how="inner",
+        validate="many_to_one",
+    )
+
+    combined = combined.merge(
+        away_metrics,
+        on=["League", "Away"],
+        how="inner",
+        validate="many_to_one",
+    )
+
     cols = [
         "League",
         "Date",
@@ -196,38 +442,98 @@ def merge_metrics(fixtures, metrics):
         "aGP",
         "hPPI",
         "aPPI",
-        "hPPINorm",
-        "aPPINorm",
     ]
-    combined = combined[cols]
-    combined["hPPI"] = combined["hPPI"].astype(float)
-    combined["aPPI"] = combined["aPPI"].astype(float)
-    combined["PPI_DIFF"] = round(abs(combined["hPPI"] - combined["aPPI"]), 2)
-    combined["PPI_DIFF_NORM"] = round(
-        abs(combined["hPPINorm"] - combined["aPPINorm"]), 2
-    )
-    return combined.reset_index(drop=True).sort_values("PPI_DIFF")
 
+    combined = combined[cols].copy()
+
+    combined["hPPI"] = pd.to_numeric(
+        combined["hPPI"],
+        errors="coerce",
+    )
+
+    combined["aPPI"] = pd.to_numeric(
+        combined["aPPI"],
+        errors="coerce",
+    )
+
+    combined["PPI_DIFF"] = (combined["hPPI"] - combined["aPPI"]).abs().round(2)
+
+    return combined.sort_values("PPI_DIFF").reset_index(drop=True)
+
+
+# ==========================================
+# MAIN: GET FIXTURES
+# ==========================================
+
+print(f"\nDate range: {TODAY.date()} to {END_DATE.date()}")
+print("\nCollecting fixtures...")
 
 fixtures = []
+
 for league in main_leagues:
     try:
         fixtures.append(get_fixtures(league))
     except Exception as e:
-        print(e)
+        print(f"[Fixtures] {league}: error ({e})")
         continue
 
-main_fixtures = pd.concat(fixtures)
+main_fixtures = pd.concat(
+    fixtures,
+    ignore_index=True,
+)
+
+print(f"\nTotal fixtures collected: {len(main_fixtures)}")
+
+
+# ==========================================
+# MAIN: GET PPI TABLES
+# ==========================================
+
+print("\nCollecting PPI tables...")
 
 ppi_tables = []
+
 for league in main_leagues:
     try:
-        ppi_tables.append(get_ppi_tables(league))
+        ppi_tables.append(get_ppi(league))
     except Exception as e:
-        print(e)
+        print(f"[PPI] {league}: error ({e})")
         continue
 
-main_ppi_tables = pd.concat(ppi_tables)
-merge_metrics(main_fixtures, main_ppi_tables).to_csv(
-    f"{TODAY}_PPI_LATEST_MAIN.csv", index=False
+main_ppi_tables = pd.concat(
+    ppi_tables,
+    ignore_index=True,
 )
+
+print(f"\nTotal PPI teams collected: {len(main_ppi_tables)}")
+
+
+# ==========================================
+# MERGE AND EXPORT
+# ==========================================
+
+print("\nMerging fixtures and PPI data...")
+
+merged = merge_metrics(
+    main_fixtures,
+    main_ppi_tables,
+)
+
+print(f"Fixtures matched: {len(merged)}")
+
+output_file = f"{TODAY}_PPI_LATEST_MAIN.csv"
+
+merged.to_csv(
+    output_file,
+    index=False,
+)
+
+print("\n" + "=" * 60)
+print("SCRAPER COMPLETED")
+print(f"Fixtures exported: {len(merged)}")
+print(f"Output file: {output_file}")
+print(f"Completed: {datetime.now():%Y-%m-%d %H:%M:%S}")
+print(f"Log file: {LOG_FILE.resolve()}")
+print("=" * 60)
+
+log_handle.flush()

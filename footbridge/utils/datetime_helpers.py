@@ -4,12 +4,19 @@ import pandas as pd
 
 
 def filter_date_range(
-    df: pd.DataFrame, start_date: datetime, end_date: datetime
+    df: pd.DataFrame,
+    start_date: datetime,
+    end_date: datetime,
 ) -> pd.DataFrame:
+    df = df.copy()
+
     df["Date"] = pd.to_datetime(df["Date"])
-    filtered_df = df[
-        (df["Date"].dt.date >= start_date) & (df["Date"].dt.date <= end_date)
-    ]
+
+    start_date = pd.Timestamp(start_date).normalize()
+    end_date = pd.Timestamp(end_date).normalize()
+
+    filtered_df = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
+
     return filtered_df
 
 
